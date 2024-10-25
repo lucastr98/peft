@@ -69,6 +69,10 @@ from .tuners import (
 from .tuners.tuners_utils import BaseTuner
 from .utils import _prepare_prompt_learning_config
 
+import sys
+sys.path.append("../../../fineinfer-autopeft")
+from custom_peft.custom_prompt_tuning import CustomPromptTuningConfig
+
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -86,6 +90,7 @@ MODEL_TYPE_TO_PEFT_MODEL_MAPPING: dict[str, type[PeftModel]] = {
 PEFT_TYPE_TO_CONFIG_MAPPING: dict[str, type[PeftConfig]] = {
     "ADAPTION_PROMPT": AdaptionPromptConfig,
     "PROMPT_TUNING": PromptTuningConfig,
+    "CUSTOM_PROMPT_TUNING": CustomPromptTuningConfig,
     "PREFIX_TUNING": PrefixTuningConfig,
     "P_TUNING": PromptEncoderConfig,
     "LORA": LoraConfig,

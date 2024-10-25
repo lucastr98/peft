@@ -105,6 +105,10 @@ PEFT_TYPE_TO_MODEL_MAPPING = {
     PeftType.VBLORA: VBLoRAModel,
 }
 
+import sys
+sys.path.append("../../../fineinfer-autopeft")
+from custom_peft.custom_prompt_tuning import CustomPromptEmbedding
+
 
 class PeftModel(PushToHubMixin, torch.nn.Module):
     """
@@ -607,8 +611,7 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
 
     def _setup_prompt_encoder(self, adapter_name: str):
         config = self.peft_config[adapter_name]
-        if not hasattr(self, "prompt_encoder"):
-            self.prompt_encoder = torch.nn.ModuleDict({})
+        if not hasattr(self, "prompt_tokens"):
             self.prompt_tokens = {}
         transformer_backbone = None
         for name, module in self.base_model.named_children():
@@ -640,8 +643,19 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 self.word_embeddings = transformer_backbone.get_submodule(named_param.replace(".weight", ""))
                 break
 
+        self.prompt_tokens[adapter_name] = torch.arange(
+            config.num_virtual_tokens * config.num_transformer_submodules
+        ).long()
+
         if config.peft_type == PeftType.PROMPT_TUNING:
             prompt_encoder = PromptEmbedding(config, self.word_embeddings)
+        elif config.peft_type == PeftType.CUSTOM_PROMPT_TUNING:
+            if not hasattr(self, "prompt_encoder"):
+                self.prompt_encoder = CustomPromptEmbedding(config, adapter_name)
+                self.prompt_encoder.to(self.device)
+            else:
+                self.prompt_encoder.update(config, adapter_name)
+            return
         elif config.peft_type == PeftType.MULTITASK_PROMPT_TUNING:
             prompt_encoder = MultitaskPromptEmbedding(config, self.word_embeddings)
         elif config.peft_type == PeftType.P_TUNING:
@@ -651,11 +665,10 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         else:
             raise ValueError("Not supported")
 
+        if not hasattr(self, "prompt_encoder"):
+            self.prompt_encoder = torch.nn.ModuleDict({})
         prompt_encoder = prompt_encoder.to(self.device)
         self.prompt_encoder.update(torch.nn.ModuleDict({adapter_name: prompt_encoder}))
-        self.prompt_tokens[adapter_name] = torch.arange(
-            config.num_virtual_tokens * config.num_transformer_submodules
-        ).long()
 
     def _prepare_model_for_gradient_checkpointing(self, model: PreTrainedModel):
         r"""
@@ -699,6 +712,9 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         """
         Returns the virtual prompts to use for Peft. Only applicable when using a prompt learning method.
         """
+        if self.active_peft_config.peft_type == PeftType.CUSTOM_PROMPT_TUNING:
+            return self.prompt_encoder(self.prompt_tokens)
+            
         peft_config = self.active_peft_config
         prompt_encoder = self.prompt_encoder[self.active_adapter]
         prompt_tokens = (

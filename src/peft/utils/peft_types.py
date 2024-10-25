@@ -25,6 +25,7 @@ class PeftType(str, enum.Enum):
 
     Supported PEFT types:
     - PROMPT_TUNING
+    - CUSTOM_PROMPT_TUNING
     - MULTITASK_PROMPT_TUNING
     - P_TUNING
     - PREFIX_TUNING
@@ -45,6 +46,7 @@ class PeftType(str, enum.Enum):
     """
 
     PROMPT_TUNING = "PROMPT_TUNING"
+    CUSTOM_PROMPT_TUNING = "CUSTOM_PROMPT_TUNING"
     MULTITASK_PROMPT_TUNING = "MULTITASK_PROMPT_TUNING"
     P_TUNING = "P_TUNING"
     PREFIX_TUNING = "PREFIX_TUNING"

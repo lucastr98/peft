@@ -83,6 +83,25 @@ class FourierFTLayer(BaseTunerLayer):
         if adapter_name in self.fourierft_spectrum.keys():
             nn.init.zeros_(self.fourierft_spectrum[adapter_name])
 
+    def _check_forward_args(self, x, *args, **kwargs):
+        """Check if the arguments are compatible with the configs and state of the model"""
+        adapter_names = kwargs.get("adapter_names", None)
+        if adapter_names is None:
+            return
+
+        if len(x) != len(adapter_names):
+            msg = (
+                "Length of `adapter_names` should be the same as the number of inputs, but got "
+                f"{len(adapter_names)} and {len(x)} respectively."
+            )
+            raise ValueError(msg)
+
+        if self.merged:
+            # It is unclear what would be the right thing to do if users pass adapter_names and there are merged
+            # adapters. Therefore, it is better to raise an error in this case.
+            msg = "Cannot pass `adapter_names` when there are merged adapters, please call `unmerge_adapter` first."
+            raise ValueError(msg)
+
     def get_delta_weight(self, adapter) -> torch.Tensor:
         spectrum = self.fourierft_spectrum[adapter]
         indices = self.indices[adapter].to(spectrum.device)
@@ -90,6 +109,34 @@ class FourierFTLayer(BaseTunerLayer):
         dense_spectrum[indices[0, :], indices[1, :]] = spectrum
         delta_weight = torch.fft.ifft2(dense_spectrum).real * self.fourierft_scaling[adapter]
         return delta_weight
+
+    def _mixed_batch_forward(
+        self, x: torch.Tensor, *args: Any, adapter_names: list[str], **kwargs: Any
+    ) -> torch.Tensor:
+        # This is a special method that handles the case when users pass the argument `adapter_names`. This is an
+        # extra argument that allows mixing different adapters in the same batch at inference time.
+        result = self.base_layer(x, *args, **kwargs)
+        torch_result_dtype = result.dtype
+
+        unique_adapters = set(adapter_names)
+        sub_batch_indices_list = []
+        for adapter in unique_adapters:
+            sub_batch_indices_list.append([index for index, item in enumerate(adapter_names) if item == adapter])
+
+        for i, active_adapter in enumerate(unique_adapters):
+            if active_adapter == "__base__":
+                continue
+            if active_adapter not in self.fourierft_spectrum.keys():
+                continue
+
+            # getting the sub-batch, passing it to FourierFT layers and updating 
+            # the corresponding indices of the linear layer output
+            delta_w = self.get_delta_weight(active_adapter)
+            sub_batch = x[sub_batch_indices_list[i]].to(delta_w.dtype)
+            fourierft_output = F.linear(sub_batch, delta_w)
+            result[sub_batch_indices_list[i]] += fourierft_output.to(torch_result_dtype)
+
+        return result
 
 
 class FourierFTLinear(nn.Module, FourierFTLayer):
@@ -164,12 +211,17 @@ class FourierFTLinear(nn.Module, FourierFTLayer):
         return super().get_delta_weight(adapter)
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        self._check_forward_args(x, *args, **kwargs)
+        adapter_names = kwargs.pop("adapter_names", None)
+
         previous_dtype = x.dtype
 
         if self.disable_adapters:
             if self.merged:
                 self.unmerge()
             result = self.base_layer(x, *args, **kwargs)
+        elif adapter_names is not None:
+            result = self._mixed_batch_forward(x, *args, adapter_names=adapter_names, **kwargs)
         elif self.merged:
             result = self.base_layer(x, *args, **kwargs)
         else:

@@ -1747,7 +1747,12 @@ class PeftModelForCausalLM(PeftModel):
                     kwargs = {k: v for k, v in kwargs.items() if k not in self.special_peft_forward_args}
                     outputs = self.base_model.generate(*args, **kwargs)
             else:
-                outputs = self.base_model.generate(**kwargs)
+                if peft_config.peft_type == PeftType.CUSTOM_PROMPT_TUNING:
+                    with self.prompt_encoder._enable_peft_forward_hooks(*args, **kwargs):
+                        kwargs = {k: v for k, v in kwargs.items() if k not in self.special_peft_forward_args}
+                        outputs = self.base_model.generate(*args, **kwargs)
+                else:
+                    outputs = self.base_model.generate(**kwargs)
         except:
             self.base_model.prepare_inputs_for_generation = self.base_model_prepare_inputs_for_generation
             raise

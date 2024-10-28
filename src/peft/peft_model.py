@@ -23,6 +23,7 @@ from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, Optional, Union
+from functools import partial
 
 import packaging.version
 import torch
@@ -695,7 +696,7 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
 
         return prompt_embeddings[0].detach().cpu()
 
-    def get_prompt(self, batch_size: int, task_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def get_prompt(self, batch_size: int, task_ids: Optional[torch.Tensor] = None, adapter_names: Optional[list[str]] = None) -> torch.Tensor:
         """
         Returns the virtual prompts to use for Peft. Only applicable when using a prompt learning method.
         """
@@ -736,13 +737,13 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 prompts = prompt_encoder(prompt_tokens, task_ids)
             else:
                 if peft_config.inference_mode:
-                    prompts = prompt_encoder.embedding.weight
+                    prompts = torch.stack([self.prompt_encoder[adapter].embedding.weight for adapter in adapter_names])
                 else:
                     # Take only one prompt token sample and expand the output instead of expanding the input, see:
                     # https://github.com/huggingface/peft/issues/2043#issuecomment-2321522577
                     prompt_tokens = prompt_tokens[:1]
                     prompts = prompt_encoder(prompt_tokens)
-                prompts = prompts.repeat(batch_size, 1, 1)
+                    prompts = prompts.repeat(batch_size, 1, 1)
             return prompts
 
     def get_nb_trainable_parameters(self) -> tuple[int, int]:
@@ -1731,6 +1732,9 @@ class PeftModelForCausalLM(PeftModel):
                     kwargs = {k: v for k, v in kwargs.items() if k not in self.special_peft_forward_args}
                     outputs = self.base_model.generate(*args, **kwargs)
             else:
+                adapter_names = kwargs.pop("adapter_names", None)
+                if adapter_names is not None:
+                    self.base_model.prepare_inputs_for_generation = partial(self.prepare_inputs_for_generation, adapter_names=adapter_names)
                 outputs = self.base_model.generate(**kwargs)
         except:
             self.base_model.prepare_inputs_for_generation = self.base_model_prepare_inputs_for_generation
@@ -1739,7 +1743,7 @@ class PeftModelForCausalLM(PeftModel):
             self.base_model.prepare_inputs_for_generation = self.base_model_prepare_inputs_for_generation
             return outputs
 
-    def prepare_inputs_for_generation(self, *args, task_ids: Optional[torch.Tensor] = None, **kwargs):
+    def prepare_inputs_for_generation(self, *args, task_ids: Optional[torch.Tensor] = None, adapter_names: Optional[list[str]] = None, **kwargs):
         peft_config = self.active_peft_config
         model_kwargs = self.base_model_prepare_inputs_for_generation(*args, **kwargs)
 
@@ -1800,7 +1804,7 @@ class PeftModelForCausalLM(PeftModel):
                 model_kwargs["past_key_values"] = new_past_key_values
             elif requires_prompt_injection:
                 inputs_embeds = self.word_embeddings(model_kwargs["input_ids"])
-                prompts = self.get_prompt(batch_size=model_kwargs["input_ids"].shape[0], task_ids=task_ids)
+                prompts = self.get_prompt(batch_size=model_kwargs["input_ids"].shape[0], task_ids=task_ids, adapter_names=adapter_names)
                 prompts = prompts.to(inputs_embeds.dtype)
                 model_kwargs["inputs_embeds"] = torch.cat((prompts, inputs_embeds), dim=1)
                 model_kwargs["input_ids"] = None

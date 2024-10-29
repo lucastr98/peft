@@ -13,8 +13,10 @@
 # limitations under the License.
 
 import warnings
+from contextlib import contextmanager
 from dataclasses import asdict
 from enum import Enum
+from functools import partial
 from typing import List, Optional
 
 import torch
@@ -35,6 +37,12 @@ from peft.utils import (
 
 from .config import OFTConfig
 from .layer import Conv2d, Linear, OFTLayer
+
+
+def _adapter_names_pre_forward_hook(target, args, kwargs, adapter_names):
+    # pre-forward hook to inject the adapter_names argument when using mixed adapter batches inference
+    kwargs["adapter_names"] = adapter_names
+    return args, kwargs
 
 
 class OFTModel(BaseTuner):
@@ -214,6 +222,13 @@ class OFTModel(BaseTuner):
         else:
             target_base_layer = target
 
+        if oft_config._custom_modules:
+            for key, custom_cls in oft_config._custom_modules.items():
+                if isinstance(target_base_layer, key):
+                    new_module = custom_cls(target, adapter_name, **kwargs)
+                    break
+            return new_module
+
         if isinstance(target_base_layer, torch.nn.Linear):
             if kwargs["fan_in_fan_out"]:
                 warnings.warn(
@@ -277,6 +292,42 @@ class OFTModel(BaseTuner):
                     module.unmerge()
                 module.set_adapter(adapter_name)
         self.active_adapter = adapter_name
+
+    @contextmanager
+    def _enable_peft_forward_hooks(self, *args, **kwargs):
+        # If adapter_names is passed as an argument, we inject it into the forward arguments.
+        adapter_names = kwargs.pop("adapter_names", None)
+        if adapter_names is None:
+            # nothing to do
+            yield
+            return
+
+        if self.training:
+            raise ValueError("Cannot pass `adapter_names` when the model is in training mode.")
+
+        # Check that users only passed actually existing adapters.
+        # Note: We cannot do this on the layer level, as each individual layer may not have each adapter. Still, we want
+        # to check that there is at least one layer with the given name, or else something like typos can easily slip.
+        expected_adapters = set()
+        for layer in self.modules():
+            if isinstance(layer, OFTLayer):
+                expected_adapters |= layer.oft_r.keys()
+        unique_adapters = {name for name in adapter_names if name != "__base__"}
+        unexpected_adapters = unique_adapters - expected_adapters
+        if unexpected_adapters:
+            raise ValueError(f"Trying to infer with non-existing adapter(s): {', '.join(sorted(unexpected_adapters))}")
+
+        hook_handles = []
+        for module in self.modules():
+            if isinstance(module, OFTLayer) or isinstance(module, ModulesToSaveWrapper):
+                pre_forward = partial(_adapter_names_pre_forward_hook, adapter_names=adapter_names)
+                handle = module.register_forward_pre_hook(pre_forward, with_kwargs=True)
+                hook_handles.append(handle)
+
+        yield
+
+        for handle in hook_handles:
+            handle.remove()
 
     @staticmethod
     def _prepare_adapter_config(peft_config, model_config):

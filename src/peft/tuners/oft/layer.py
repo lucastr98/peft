@@ -294,6 +294,25 @@ class OFTLayer(BaseTunerLayer):
             return lower_params
         else:
             return higher_params
+            
+    def _check_forward_args(self, x, *args, **kwargs):
+        """Check if the arguments are compatible with the configs and state of the model"""
+        adapter_names = kwargs.get("adapter_names", None)
+        if adapter_names is None:
+            return
+
+        if len(x) != len(adapter_names):
+            msg = (
+                "Length of `adapter_names` should be the same as the number of inputs, but got "
+                f"{len(adapter_names)} and {len(x)} respectively."
+            )
+            raise ValueError(msg)
+
+        if self.merged:
+            # It is unclear what would be the right thing to do if users pass adapter_names and there are merged
+            # adapters. Therefore, it is better to raise an error in this case.
+            msg = "Cannot pass `adapter_names` when there are merged adapters, please call `unmerge_adapter` first."
+            raise ValueError(msg)
 
 
 class Linear(nn.Module, OFTLayer):
